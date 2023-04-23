@@ -41,51 +41,101 @@ def load_metadata():
     return cell_type_to_label, channels
 
 
-def get_average_data():
+def main(X, y, cell_types):
     '''
-    Average the expression data for each cell for each marker. Produces a file
-    where each row contains data for each individual cell (across all files),
+    Just what the assignment asks for. 
+    '''
+    
+    # For this function, don't bother accumulating and writing to a file. 
+    data = get_average_data(X, y, cell_types)
+    X, y = reformat(data)
+
+    data = train_test_split(X, y, train_size=0.7, shuffle=True)
+
+    # Load the best model. 
+    model = torch.load('model.pickle')
+    
+    y_pred = model(data[1])
+    # Need to return a mapping of the cell number to cell type. 
+    y_pred = torch.argmax(y_pred, 1)
+    
+    mapping = {}
+    for i in range(len(y_pred)):
+        mapping[i] = y_pred[i]
+
+    return mapping
+
+
+def generate_data_file(filename='data.csv'):
+    '''
+    Produces a file where each row contains data for each individual cell (across all files),
     and each column indicates the average expression for a particular marker (so
     there are ncells rows and 51 columns)
     '''
-    # Need to make a training dataset with expression information for each cell. 
-    training_data = {'cell_number':[], 'marker':[], 'expression':[], 'cell_type':[]}
-
+    dfs = []
+    
+    # Make sure all cells have a unique id across images. 
+    cell_number = 0
     for file in tqdm([f for f in files if f != 'meta.yaml'], desc='Loading files...'):
         npz = np.load(data_dir + file, allow_pickle=True)
         # Because npz['cell_types'] has shape (), need to use item() to extract the
         # dictionary. 
         X, y, cell_types = npz['X'], npz['y'], npz['cell_types'].item()
-        # Get rid of the weird first dimension.
-        X, y = X[0], y[0]
-        # X array has shape (1, 2048, 2048, 51). Last index is channels (i.e. markers)
-        # y array has shape (1, 2048, 2048, 2) 
-        # cell_types array is a dictionary mapping the mask indices to the cell types.
         
-        # First, normalize the data... Rohit said to normalize across each
-        # marker in each file.
-        # Some of the channels have no expression... maybe just handle by
-        # subbing out 1, and keeping things the same?
-        normalizer = np.amax(X, axis=(0, 1), keepdims=True)
-        # Some of the channels have no expression, so ensure no NaNs. 
-        normalizer[normalizer == 0] = 1
-        X = X/normalizer
-
-        # Probably should use the whole-cell segments, not nuclear...
-        y = y[:, :, 0]
-       
-        cell_num_min, cell_num_max = np.min(y), np.max(y)
-        for i in range(cell_num_min, cell_num_max + 1):
-            # Take the mean expression across each channel.
-            cell_data = np.mean(X[y == i, :], axis=0)
-            
-            training_data['expression'] += list(cell_data)
-            training_data['marker'] += [n for n in range(51)]
-            training_data['cell_type'] += [cell_types[i]] * 51
+        df = get_average_data(X, y, cell_types, cell_number_start=cell_number)
+        
+        # Increase cell number. 
+        cell_number += np.max(y)
+        print(cell_number)
+        
+        dfs.append(df)
 
     # Write all the cleaned-up data to a CSV file to avoid re-generating. 
-    training_data = pd.DataFrame(training_data)
+    training_data = pd.concat(dfs, ignore_index=True)
     training_data.to_csv('data.csv')
+
+
+def get_average_data(X, y, cell_types, cell_number_start=0):
+    '''
+    Specify cell_number_start to ensure all cells are uniquely numbered (not
+    sure if the data does this already?). Update: It does not. 
+    '''
+    # Need to make a training dataset with expression information for each cell. 
+    training_data = {'cell_number':[], 'marker':[], 'expression':[], 'cell_type':[]}
+
+    # Get rid of the weird first dimension.
+    X, y = X[0], y[0]
+    # X array has shape (1, 2048, 2048, 51). Last index is channels (i.e. markers)
+    # y array has shape (1, 2048, 2048, 2) 
+    # cell_types array is a dictionary mapping the mask indices to the cell types.
+    
+    # First, normalize the data... Rohit said to normalize across each
+    # marker in each file.
+    # Some of the channels have no expression... maybe just handle by
+    # subbing out 1, and keeping things the same?
+    normalizer = np.amax(X, axis=(0, 1), keepdims=True)
+    # Some of the channels have no expression, so ensure no NaNs. 
+    normalizer[normalizer == 0] = 1
+    X = X/normalizer
+
+    # Probably should use the whole-cell segments, not nuclear...
+    y = y[:, :, 0]
+    
+    # Keep track of unique index. 
+    cell_number = cell_number_start
+
+    for i in range(np.max(y)):
+        # Take the mean expression across each channel.
+        cell_data = np.mean(X[y == i, :], axis=0)
+        
+        training_data['cell_number'] += [cell_number] * 51
+        training_data['expression'] += list(cell_data)
+        training_data['marker'] += [n for n in range(51)]
+        training_data['cell_type'] += [cell_types[i]] * 51
+
+        cell_number += 1
+    
+    return pd.DataFrame(training_data)
 
 
 def filter_channels(nchannels):
@@ -97,11 +147,11 @@ def filter_channels(nchannels):
     # cell_type_to_label, channels = load_metadata()
     
     data = pd.read_csv('./data.csv')
+    print(data.shape)
     data = data.groupby(['cell_type', 'marker'], as_index=False)['expression'].mean()
     data = data.pivot(index='cell_type', columns='marker', values='expression')
     # I think we throw away the first channel? It seems like it might be some
 
-    fig, ax = plt.subplots(figsize=(20, 10))
     
     # For the purposes of selecting which markers should be kept, find the
     # columns with the highest variance. 
@@ -122,14 +172,22 @@ def create_confusion_matrix(y_pred, y_test):
     cell_type_to_label, _ = load_metadata()
     fig, ax = plt.subplots(1, figsize=(15, 10))
     ax.set_title('CelltypeClassifier confusion matrix')
-   
+    ax.set_ylabel('true') 
+    ax.set_xlabel('predicted') 
     y_pred = torch.argmax(y_pred, 1) # I think we need to actually make predictions. 
     matrix = confusion_matrix(y_test.detach().numpy(), y_pred.detach().numpy())
     
     # It seems as though some cell types might not be included?
     cell_types = np.sort(np.unique(y_test.detach().numpy()))
 
+    # Which cell types are not represented?
+    missing = [cell_type_to_label[t] for t in range(18) if t not in cell_types]
+    print('The following cell types are not represented in the prediction:', missing)
     # Not totally sure if these are properly labeled. 
+    
+    # Normalize the matrix so each thingy is a probability. 
+    matrix = matrix / np.sum(matrix)
+
     labels = [cell_type_to_label[t] for t in cell_types]
     sns.heatmap(matrix, ax=ax, annot=True, yticklabels=labels, xticklabels=labels)
 
@@ -166,6 +224,8 @@ def create_marker_expression_panel(nchannels=25):
     '''
     Create and save the marker expression panel for the first deliverable. 
     '''
+    fig, ax = plt.subplots(figsize=(20, 10))
+    
     _, data = filter_channels(nchannels)
     cell_type_to_label, channels = load_metadata()
 
@@ -271,11 +331,11 @@ def train(model, data, batch_size=64, epochs=200):
     return train_loss_hist, test_loss_hist, train_acc_hist, test_acc_hist
 
 
-def load_data(path='./data.csv', nchannels=25):
+def reformat(data, nchannels=25):
     '''
-    Load in the average data from a CSV file. 
+    Process the loaded data by filtering out some of the channels, reorienting
+    the DataFrame, and converting to tensors. 
     '''
-    data = pd.read_csv(path, index_col=0)
     # Filter for the channels we care about
     channels_to_keep, _ = filter_channels(nchannels)
     data = data.loc[data['marker'].isin(channels_to_keep)]
@@ -293,25 +353,32 @@ def load_data(path='./data.csv', nchannels=25):
     return X, y
 
 
+# This part of the script generates the confusion matrix. 
 if __name__ == '__main__':
     
-    X, y = load_data()
-    data = train_test_split(X, y, train_size=0.7, shuffle=True)
-
+    # create_marker_expression_panel(nchannels=25)
+    # generate_data_file()
+    
+    # Read in data written to the CSV file. This data has already gone through
+    # some of the preprocessing. 
+#     data = pd.read_csv('data.csv', index_col=0)
+#     X, y = reformat(data)
+#     data = train_test_split(X, y, train_size=0.7, shuffle=True)
+#  
 #     model = CelltypeClassifier()
+#     
 #     hists = train(model, data)
 #     create_model_trajectory_plots(hists)
-#     # get_average_data()
-
+ 
     # Load the best model. 
     model = torch.load('model.pickle')
     y_pred = model(data[1])
     y_test = data[3].to(torch.long)
     print('Final model test accuracy:', accuracy(y_pred, y_test))
-    
+   
     create_confusion_matrix(y_pred, y_test)
 
-    pass
+
 
 # class LinearClassifier(object):
 #     '''

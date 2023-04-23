@@ -1,0 +1,11 @@
+name: bebi205
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - jupyterlab
+  - pytorch
+  - pytorch-cuda=11.7
+  - ca-certificates
+  - openssl
+prefix: /home/philippa/mambaforge/envs/bebi205
